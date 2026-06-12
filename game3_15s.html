@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Stealth Escape</title>
+    <style>
+        * { box-sizing: border-box; user-select: none; -webkit-user-select: none; }
+        body {
+            margin: 0; padding: 0;
+            background-color: #222; color: #fff;
+            font-family: sans-serif;
+            display: flex; flex-direction: column;
+            align-items: center; justify-content: flex-start;
+            min-height: 100vh; overflow: hidden;
+            padding-top: 10px;
+        }
+        #hud {
+            width: 100%; max-width: 400px;
+            display: flex; justify-content: space-between;
+            padding: 5px 20px; font-size: 18px; font-weight: bold;
+        }
+        #game-container {
+            position: relative;
+            width: 90vw; height: 90vw;
+            max-width: 380px; max-height: 380px;
+            background-color: #111;
+            border: 4px solid #444;
+        }
+        canvas { width: 100%; height: 100%; display: block; }
+        .screen {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.95);
+            display: flex; flex-direction: column;
+            align-items: center; justify-content: center;
+            z-index: 100; /* 最前面に確実に表示 */
+        }
+        .hidden { display: none !important; }
+        
+        /* ボタンを押しやすく調整 */
+        .menu-btn {
+            padding: 15px 30px; font-size: 20px; font-weight: bold;
+            background-color: #00ff88; color: #000;
+            border: none; border-radius: 8px; cursor: pointer;
+            margin-top: 20px;
+            box-shadow: 0 4px 10px rgba(0,255,136,0.3);
+        }
+        .menu-btn:active { background-color: #00cc66; }
+        #instructions { font-size: 12px; color: #aaa; margin-top: 12px; text-align: center;}
+
+        /* コントローラーエリア */
+        #controller {
+            width: 100%; max-width: 240px;
+            margin-top: 15px;
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            grid-template-rows: repeat(2, 60px);
+            gap: 10px;
+            z-index: 5;
+        }
+        .ctrl-btn {
+            background-color: #333; color: #fff;
+            border: 2px solid #555; border-radius: 10px;
+            font-size: 24px; font-weight: bold;
+            display: flex; align-items: center; justify-content: center;
+            cursor: pointer;
+            touch-action: none;
+        }
+        .ctrl-btn:active { background-color: #555; color: #00ff88; }
+        .empty { visibility: hidden; }
+    </style>
+</head>
+<body>
+
+    <div id="hud">
+        <div id="stage-display">STAGE: 1</div>
+        <div id="status-display" style="color: #00ff88;">侵入中...</div>
+    </div>
+
+    <div id="game-container">
+        <canvas id="gameCanvas" width="400" height="400"></canvas>
+
+        <div id="start-screen" class="screen">
+            <h1 style="color: #00ff88; margin: 0 0 10px 0; font-size: 28px;">STEALTH ESCAPE</h1>
+            <p style="margin: 0; text-align: center; padding: 0 20px; line-height: 1.5;">
+                警備員の視線を避けて<br>右下の緑のゴールを目指せ！
+            </p>
+            <button id="start-btn" class="menu-btn">ゲーム開始</button>
+            <div id="instructions">下のボタンまたはスワイプで移動</div>
+        </div>
+
+        <div id="gameover-screen" class="screen hidden">
+            <h1 style="color: #ff3333; margin: 0 0 10px 0;">❌ 見つかった！</h1>
+            <p id="over-reason">警備員の視界に入ってしまった。</p>
+            <button id="retry-btn" class="menu-btn">もう一度挑戦</button>
+        </div>
+
+        <div id="clear-screen" class="screen hidden">
+            <h1 style="color: #00ff88; margin: 0 0 10px 0;">🎉 CLEAR!</h1>
+            <p>次のステージは警備が強化されます...</p>
+            <button id="next-btn" class="menu-btn">次のステージへ</button>
+        </div>
+    </div>
+
+    <div id="controller">
+        <div class="empty"></div>
+        <div class="ctrl-btn" id="btn-up">▲</div>
+        <div class="empty"></div>
+        
+        <div class="ctrl-btn" id="btn-left">◀</div>
+        <div class="ctrl-btn" id="btn-down">▼</div>
+        <div class="ctrl-btn" id="btn-right">▶</div>
+    </div>
+
+    <script>
+        // ページの読み込みが完全に終わってからすべての処理を開始する
+        window.addEventListener('DOMContentLoaded', () => {
+            const canvas = document.getElementById('gameCanvas');
+            const ctx = canvas.getContext('2d');
+
+            const GRID_SIZE = 10; 
+            const CELL_SIZE = canvas.width / GRID_SIZE;
+
+            let stage = 1;
+            let gameState = 'START'; 
+            let player = { x: 0, y: 0 };
+            let goal = { x: GRID_SIZE - 1, y: GRID_SIZE - 1 };
+            let walls = [];
+            let guards = [];
+            let gameLoopId = null;
+            let stageStartTime = 0;
+
+            function getDifficulty() {
+                return {
+                    guardCount: Math.min(2 + Math.floor(stage / 2), 6),       
+                    visionLength: Math.min(2 + Math.max(1, Math.floor(stage * 0.4)), 5),  
+                    speed: Math.max(12, 35 - stage * 2),                     
+                    wallDensity: 0.20 
+                };
+            }
+
+            // --- マップ生成 ---
+            function generateMap() {
+                const config = getDifficulty();
+                let validMap = false;
+                let safetyCounter = 0;
+
+                while (!validMap && safetyCounter < 100) {
+                    safetyCounter++;
+                    walls = Array(GRID_SIZE).fill().map(() => Array(GRID_SIZE).fill(false));
+                    
+                    for (let y = 0; y < GRID_SIZE; y++) {
+                        for (let x = 0; x < GRID_SIZE; x++) {
+                            if ((x === 0 && y === 0) || (x === goal.x && y === goal.y)) continue;
+                            if ((x <= 1 && y <= 1) || (x >= GRID_SIZE-2 && y >= GRID_SIZE-2)) {
+                                continue; // スタートとゴールの周辺は絶対に塞がない
+                            }
+                            if (Math.random() < config.wallDensity) {
+                                walls[y][x] = true;
+                            }
+                        }
+                    }
+
+                    if (hasMultipleRoutes()) {
+                        validMap = true;
+                    }
+                }
+
+                if (!validMap) {
+                    walls = Array(GRID_SIZE).fill().map(() => Array(GRID_SIZE).fill(false));
+                }
+
+                guards = [];
+                const directions = [{x:0, y:-1}, {x:1, y:0}, {x:0, y:1}, {x:-1, y:0}]; 
+
+                for (let i = 0; i < config.guardCount; i++) {
+                    let gx, gy;
+                    let attempts = 0;
+                    do {
+                        gx = Math.floor(Math.random() * GRID_SIZE);
+                        gy = Math.floor(Math.random() * GRID_SIZE);
+                        attempts++;
+                    } while (
+                        (walls[gy][gx] || (Math.abs(gx - player.x) + Math.abs(gy - player.y) < 3) || (gx === goal.x && gy === goal.y)) 
+                        && attempts < 50
+                    );
+
+                    guards.push({
+                        x: gx,
+                        y: gy,
+                        dir: directions[Math.floor(Math.random() * 4)],
+                        moveTimer: Math.floor(Math.random() * config.speed)
+                    });
+                }
+            }
+
+            function hasMultipleRoutes() {
+                let path1 = findBFSPath();
+                if (!path1) return false;
+
+                let testIndex = Math.floor(path1.length / 2);
+                if (testIndex <= 0 || testIndex >= path1.length - 1) return true;
+
+                let tx = path1[testIndex].x;
+                let ty = path1[testIndex].y;
+                
+                walls[ty][tx] = true; 
+                let path2 = findBFSPath(); 
+                walls[ty][tx] = false; 
+
+                return path2 !== null; 
+            }
+
+            function findBFSPath() {
+                let queue = [{x: 0, y: 0, path: [{x:0, y:0}]}];
+                let visited = Array(GRID_SIZE).fill().map(() => Array(GRID_SIZE).fill(false));
+                visited[0][0] = true;
+
+                while (queue.length > 0) {
+                    let current = queue.shift();
+                    if (current.x === goal.x && current.y === goal.y) {
+                        return current.path;
+                    }
+
+                    const dirs = [[0,1],[1,0],[0,-1],[-1,0]];
+                    for (let [dx, dy] of dirs) {
+                        let nx = current.x + dx, ny = current.y + dy;
+                        if (nx >= 0 && nx < GRID_SIZE && ny >= 0 && ny < GRID_SIZE) {
+                            if (!walls[ny][nx] && !visited[ny][nx]) {
+                                visited[ny][nx] = true;
+                                let newPath = [...current.path, {x: nx, y: ny}];
+                                queue.push({x: nx, y: ny, path: newPath});
+                            }
+                        }
+                    }
+                }
+                return null;
+            }
+
+            // --- ゲームループ ---
+            function gameLoop() {
+                if (gameState !== 'PLAYING') return;
+                updateGuards();
+                checkCollisions();
+                draw();
+                gameLoopId = requestAnimationFrame(gameLoop);
+            }
+
+            function updateGuards() {
+                const diff = getDifficulty();
+                const dirs = [{x:0, y:-1}, {x:1, y:0}, {x:0, y:1}, {x:-1, y:0}];
+
+                guards.forEach(g => {
+                    g.moveTimer++;
+                    if (g.moveTimer >= diff.speed) {
+                        g.moveTimer = 0;
+
+                        let nextX = g.x + g.dir.x;
+                        let nextY = g.y + g.dir.y;
+                        
+                        let needNewDir = nextX < 0 || nextX >= GRID_SIZE || nextY < 0 || nextY >= GRID_SIZE || walls[nextY][nextX] || Math.random() < 0.15;
+
+                        if (needNewDir) {
+                            let validDirs = dirs.filter(d => {
+                                let nx = g.x + d.x;
+                                let ny = g.y + d.y;
+                                return nx >= 0 && nx < GRID_SIZE && ny >= 0 && ny < GRID_SIZE && !walls[ny][nx];
+                            });
+                            if (validDirs.length > 0) {
+                                g.dir = validDirs[Math.floor(Math.random() * validDirs.length)];
+                            }
+                        }
+
+                        let finalX = g.x + g.dir.x;
+                        let finalY = g.y + g.dir.y;
+                        if (finalX >= 0 && finalX < GRID_SIZE && finalY >= 0 && finalY < GRID_SIZE && !walls[finalY][finalX]) {
+                            g.x = finalX;
+                            g.y = finalY;
+                        }
+                    }
+                });
+            }
+
+            function checkCollisions() {
+                if (Date.now() - stageStartTime < 1500) return;
+                const diff = getDifficulty();
+
+                if (player.x === goal.x && player.y === goal.y) {
+                    endGame('CLEAR');
+                    return;
+                }
+
+                for (let g of guards) {
+                    if (player.x === g.x && player.y === g.y) {
+                        endGame('GAMEOVER');
+                        return;
+                    }
+
+                    for (let i = 1; i <= diff.visionLength; i++) {
+                        let vx = g.x + g.dir.x * i;
+                        let vy = g.y + g.dir.y * i;
+
+                        if (vx < 0 || vx >= GRID_SIZE || vy < 0 || vy >= GRID_SIZE || walls[vy][vx]) {
+                            break;
+                        }
+
+                        if (player.x === vx && player.y === vy) {
+                            endGame('GAMEOVER');
+                            return;
+                        }
+                    }
+                }
+            }
+
+            // --- 描画 ---
+            function draw() {
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                const diff = getDifficulty();
+
+                for (let y = 0; y < GRID_SIZE; y++) {
+                    for (let x = 0; x < GRID_SIZE; x++) {
+                        if (walls[y][x]) {
+                            ctx.fillStyle = '#444';
+                            ctx.fillRect(x * CELL_SIZE, y * CELL_SIZE, CELL_SIZE - 1, CELL_SIZE - 1);
+                        } else {
+                            ctx.fillStyle = '#1a1a1a';
+                            ctx.fillRect(x * CELL_SIZE, y * CELL_SIZE, CELL_SIZE, CELL_SIZE);
+                        }
+                    }
+                }
+
+                // ゴール
+                ctx.fillStyle = 'rgba(0, 255, 136, 0.3)';
+                ctx.fillRect(goal.x * CELL_SIZE, goal.y * CELL_SIZE, CELL_SIZE, CELL_SIZE);
+                ctx.strokeStyle = '#00ff88';
+                ctx.lineWidth = 3;
+                ctx.strokeRect(goal.x * CELL_SIZE + 4, goal.y * CELL_SIZE + 4, CELL_SIZE - 8, CELL_SIZE - 8);
+
+                // 視線
+                guards.forEach(g => {
+                    ctx.fillStyle = 'rgba(255, 51, 51, 0.3)';
+                    for (let i = 1; i <= diff.visionLength; i++) {
+                        let vx = g.x + g.dir.x * i;
+                        let vy = g.y + g.dir.y * i;
+                        if (vx < 0 || vx >= GRID_SIZE || vy < 0 || vy >= GRID_SIZE || walls[vy][vx]) break;
+                        ctx.fillRect(vx * CELL_SIZE, vy * CELL_SIZE, CELL_SIZE, CELL_SIZE);
+                    }
+                });
+
+                // 警備員
+                guards.forEach(g => {
+                    ctx.fillStyle = '#ff3333';
+                    ctx.beginPath();
+                    let cx = g.x * CELL_SIZE + CELL_SIZE / 2;
+                    let cy = g.y * CELL_SIZE + CELL_SIZE / 2;
+                    ctx.arc(cx, cy, CELL_SIZE * 0.4, 0, Math.PI * 2);
+                    ctx.fill();
+
+                    ctx.strokeStyle = '#fff';
+                    ctx.lineWidth = 2;
+                    ctx.beginPath();
+                    ctx.moveTo(cx, cy);
+                    ctx.lineTo(cx + g.dir.x * (CELL_SIZE*0.4), cy + g.dir.y * (CELL_SIZE*0.4));
+                    ctx.stroke();
+                });
+
+                // プレイヤー
+                ctx.fillStyle = '#00bfff';
+                ctx.beginPath();
+                ctx.arc(player.x * CELL_SIZE + CELL_SIZE / 2, player.y * CELL_SIZE + CELL_SIZE / 2, CELL_SIZE * 0.35, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.strokeStyle = '#fff';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+            }
+
+            // --- 移動処理 ---
+            function movePlayer(dx, dy) {
+                if (gameState !== 'PLAYING') return;
+                let nextX = player.x + dx;
+                let nextY = player.y + dy;
+
+                if (nextX >= 0 && nextX < GRID_SIZE && nextY >= 0 && nextY < GRID_SIZE) {
+                    if (!walls[nextY][nextX]) {
+                        player.x = nextX;
+                        player.y = nextY;
+                        checkCollisions();
+                        draw();
+                    }
+                }
+            }
+
+            // --- コントローラーイベント登録（あらゆる端末に対応） ---
+            const bindControl = (id, dx, dy) => {
+                const btn = document.getElementById(id);
+                // スマホのダブルタップズームやスクロールなどの挙動をすべて無効化して移動を実行
+                const trigger = (e) => {
+                    e.preventDefault();
+                    movePlayer(dx, dy);
+                };
+                btn.addEventListener('touchstart', trigger, { passive: false });
+                btn.addEventListener('mousedown', trigger);
+            };
+            bindControl('btn-up', 0, -1);
+            bindControl('btn-down', 0, 1);
+            bindControl('btn-left', -1, 0);
+            bindControl('btn-right', 1, 0);
+
+            // スワイプ操作
+            let touchStartX = 0;
+            let touchStartY = 0;
+            window.addEventListener('touchstart', e => {
+                touchStartX = e.touches[0].clientX;
+                touchStartY = e.touches[0].clientY;
+            }, { passive: true });
+
+            window.addEventListener('touchend', e => {
+                if (gameState !== 'PLAYING') return;
+                if (e.target.classList.contains('ctrl-btn')) return;
+
+                let diffX = e.changedTouches[0].clientX - touchStartX;
+                let diffY = e.changedTouches[0].clientY - touchStartY;
+                
+                if (Math.abs(diffX) > 30 || Math.abs(diffY) > 30) {
+                    if (Math.abs(diffX) > Math.abs(diffY)) {
+                        movePlayer(diffX > 0 ? 1 : -1, 0);
+                    } else {
+                        movePlayer(0, diffY > 0 ? 1 : -1);
+                    }
+                }
+            });
+
+            // キーボード
+            window.addEventListener('keydown', e => {
+                if (e.key === 'ArrowUp' || e.key === 'w') movePlayer(0, -1);
+                if (e.key === 'ArrowDown' || e.key === 's') movePlayer(0, 1);
+                if (e.key === 'ArrowLeft' || e.key === 'a') movePlayer(-1, 0);
+                if (e.key === 'ArrowRight' || e.key === 'd') movePlayer(1, 0);
+            });
+
+            // --- ゲーム状態管理 ---
+            function startGame() {
+                document.getElementById('start-screen').classList.add('hidden');
+                initStage();
+            }
+
+            function initStage() {
+                gameState = 'PLAYING';
+                stageStartTime = Date.now();
+                document.getElementById('stage-display').innerText = `STAGE: ${stage}`;
+                document.getElementById('status-display').innerText = `侵入中...`;
+                document.getElementById('status-display').style.color = '#00ff88';
+                
+                player.x = 0;
+                player.y = 0;
+                
+                generateMap();
+
+                // スタート地点が警備員の視界に入っていないことを保証
+                let safe = false;
+                let retry = 0;
+                while (!safe && retry < 50) {
+                    safe = true;
+                    const diff = getDifficulty();
+                    for (let g of guards) {
+                        for (let i = 0; i <= diff.visionLength; i++) {
+                            let vx = g.x + g.dir.x * i;
+                            let vy = g.y + g.dir.y * i;
+                            if (vx === 0 && vy === 0) {
+                                safe = false;
+                                generateMap();
+                                break;
+                            }
+                        }
+                        if (!safe) break;
+                    }
+                    retry++;
+                }
+
+                draw();
+
+                if (gameLoopId) cancelAnimationFrame(gameLoopId);
+                gameLoop(); 
+            }
+
+            function endGame(result) {
+                gameState = result;
+                if (gameLoopId) cancelAnimationFrame(gameLoopId);
+
+                if (result === 'GAMEOVER') {
+                    document.getElementById('status-display').innerText = `捕捉された！`;
+                    document.getElementById('status-display').style.color = '#ff3333';
+                    document.getElementById('gameover-screen').classList.remove('hidden');
+                } else if (result === 'CLEAR') {
+                    document.getElementById('status-display').innerText = `突破！`;
+                    document.getElementById('status-display').style.color = '#00ff88';
+                    document.getElementById('clear-screen').classList.remove('hidden');
+                }
+            }
+
+            // メニューボタンのクリックイベント（どんな端末でも確実に反応するように統合）
+            const bindMenuBtn = (id, callback) => {
+                const btn = document.getElementById(id);
+                btn.addEventListener('click', callback);
+                btn.addEventListener('touchstart', (e) => {
+                    e.preventDefault();
+                    callback();
+                }, { passive: false });
+            };
+
+            bindMenuBtn('start-btn', startGame);
+            bindMenuBtn('retry-btn', () => {
+                stage = 1;
+                document.getElementById('gameover-screen').classList.add('hidden');
+                initStage();
+            });
+            bindMenuBtn('next-btn', () => {
+                stage++;
+                document.getElementById('clear-screen').classList.add('hidden');
+                initStage();
+            });
+
+            // 初回描画
+            draw();
+        });
+    </script>
+</body>
+</html>
